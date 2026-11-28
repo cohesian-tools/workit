@@ -9,6 +9,63 @@ import (
 	"strings"
 )
 
+// SyncStatus describes how registered nodes and physical nodes overlap in a scope.
+type SyncStatus struct {
+	Selected                      graph.Node
+	Inner, IndexOnly, WorkdirOnly []graph.Node
+}
+
+// SyncStatus compares the selected subtree without taking the write lock.
+func (s Service) SyncStatus(ctx context.Context, directory string) (SyncStatus, error) {
+	root, i, _, selected, err := s.locate(directory)
+	if err != nil {
+		return SyncStatus{}, err
+	}
+	return s.compareSync(ctx, root, i, selected)
+}
+
+func (s Service) compareSync(ctx context.Context, root string, i graph.Index, selected graph.Node) (SyncStatus, error) {
+	var status SyncStatus
+	discovered, err := s.Disk.Discover(ctx, root, selected, i.Exclude)
+	if err != nil {
+		return status, err
+	}
+	indexed := i.Scope(selected)
+	byIndex, byDisk := make(map[string]graph.Node), make(map[string]graph.Node)
+	folded := make(map[string]string)
+	for _, node := range indexed {
+		if _, err := s.Disk.Check(root, node); err != nil {
+			return status, err
+		}
+		byIndex[node.Path], folded[strings.ToLower(node.Path)] = node, node.Path
+	}
+	for _, node := range discovered {
+		key := strings.ToLower(node.Path)
+		if previous, ok := folded[key]; ok && previous != node.Path {
+			return status, fmt.Errorf("case conflict: %s and %s", previous, node.Path)
+		}
+		folded[key], byDisk[node.Path] = node.Path, node
+		if registered, ok := byIndex[node.Path]; ok && registered != node {
+			return status, fmt.Errorf("identity conflict at %s: index=%+v, physical=%+v", node.Path, registered, node)
+		}
+	}
+	status.Selected = selected
+	for _, node := range indexed {
+		if _, ok := byDisk[node.Path]; ok {
+			status.Inner = append(status.Inner, node)
+		} else if node.Kind != graph.Root {
+			status.IndexOnly = append(status.IndexOnly, node)
+		}
+	}
+	for _, node := range discovered {
+		if _, ok := byIndex[node.Path]; !ok && node.Kind != graph.Root {
+			status.WorkdirOnly = append(status.WorkdirOnly, node)
+		}
+	}
+	graph.Sort(status.WorkdirOnly)
+	return status, nil
+}
+
 func (s Service) Sync(ctx context.Context, directory, side, mode string, options Options) (Plan, []Result, error) {
 	return s.writeScope(directory, options.DryRun, func(root string, i graph.Index, raw []byte, selected graph.Node) (Plan, []Result, error) {
 		plan := Plan{Root: root, Selected: selected}
@@ -18,51 +75,19 @@ func (s Service) Sync(ctx context.Context, directory, side, mode string, options
 		if !(side == "index" && (mode == "add" || mode == "prune")) && !(side == "workdir" && (mode == "add" || mode == "remove")) {
 			return plan, nil, fmt.Errorf("unknown synchronization operation")
 		}
-		discovered, err := s.Disk.Discover(ctx, root, selected, i.Exclude)
+		status, err := s.compareSync(ctx, root, i, selected)
 		if err != nil {
 			return plan, nil, err
 		}
-		indexed := i.Scope(selected)
-		byIndex, byDisk := make(map[string]graph.Node), make(map[string]graph.Node)
-		folded := make(map[string]string)
-		for _, node := range indexed {
-			if _, err := s.Disk.Check(root, node); err != nil {
-				return plan, nil, err
-			}
-			byIndex[node.Path], folded[strings.ToLower(node.Path)] = node, node.Path
-		}
-		for _, node := range discovered {
-			key := strings.ToLower(node.Path)
-			if previous, ok := folded[key]; ok && previous != node.Path {
-				return plan, nil, fmt.Errorf("case conflict: %s and %s", previous, node.Path)
-			}
-			folded[key], byDisk[node.Path] = node.Path, node
-			if registered, ok := byIndex[node.Path]; ok && registered != node {
-				return plan, nil, fmt.Errorf("identity conflict at %s: index=%+v, physical=%+v", node.Path, registered, node)
-			}
-		}
-		var missing, extra []graph.Node
-		for _, node := range indexed {
-			if _, ok := byDisk[node.Path]; !ok && node.Kind != graph.Root {
-				missing = append(missing, node)
-			}
-		}
-		for _, node := range discovered {
-			if _, ok := byIndex[node.Path]; !ok && node.Kind != graph.Root {
-				extra = append(extra, node)
-			}
-		}
-		graph.Sort(missing)
-		graph.Sort(extra)
 		if side == "index" {
 			if mode == "add" {
-				for _, node := range extra {
+				for _, node := range status.WorkdirOnly {
 					plan.Steps = append(plan.Steps, Step{Action: "register", Node: node})
 					i.Nodes = append(i.Nodes, node)
 				}
 			} else {
 				removed := make(map[string]bool)
-				for _, node := range missing {
+				for _, node := range status.IndexOnly {
 					removed[node.Path] = true
 					plan.Steps = append(plan.Steps, Step{Action: "unregister", Node: node})
 				}
@@ -90,13 +115,14 @@ func (s Service) Sync(ctx context.Context, directory, side, mode string, options
 			return plan, results, nil
 		}
 		if mode == "add" {
-			for _, node := range missing {
+			for _, node := range status.IndexOnly {
 				plan.Steps = append(plan.Steps, Step{Action: "materialize", Node: node})
 			}
 		} else {
 			plan.Destructive = true
 			// Quarantine only maximal extra subtrees; never a matched descendant.
-			for _, node := range extra {
+			indexed := i.Scope(selected)
+			for _, node := range status.WorkdirOnly {
 				covered := false
 				for _, step := range plan.Steps {
 					if graph.Within(step.Node.Path, node.Path) {

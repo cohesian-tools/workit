@@ -39,6 +39,7 @@ type Receipt struct{ Original, Payload, Entry string }
 
 type RepoState struct {
 	Branch, Upstream                                      string
+	HasCommit, HasComparison, Unrelated                   bool
 	Ahead, Behind, Staged, Unstaged, Untracked, Conflicts int
 }
 

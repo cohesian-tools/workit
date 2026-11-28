@@ -47,7 +47,7 @@ func TestCLIHelpAndFilesystemFlow(t *testing.T) {
 	}
 	before, _ := os.ReadFile(filepath.Join(root, index.Filename))
 	out, err := run(t, root, "", "node", "add", "tools", "--dry-run")
-	if err != nil || !strings.Contains(out, "add  tools") {
+	if err != nil || !strings.Contains(out, "└── tools/ · add") {
 		t.Fatal(out, err)
 	}
 	after, _ := os.ReadFile(filepath.Join(root, index.Filename))
@@ -86,7 +86,7 @@ func TestCommandArgumentsAndEmptyGroupsDoNotMutate(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, args := range [][]string{{"node", "add", "../escape"}, {"node", "remove", "."}, {"repo", "pull", "main"}, {"sync", "all"}, {"config", "protocol", "ftp"}} {
+	for _, args := range [][]string{{"node", "add", "../escape"}, {"node", "remove", "."}, {"repo", "pull", "main"}, {"sync", "all"}, {"completion"}, {"config", "protocol", "ftp"}} {
 		if _, err := run(t, root, "", args...); err == nil {
 			t.Fatal("accepted invalid command", args)
 		}
@@ -141,5 +141,78 @@ func TestCancelledConfirmationReleasesLockWithoutMovingContent(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, ".workit.lock")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("lock not released")
+	}
+}
+
+func TestSyncStatusPrintsThreeScopedTrees(t *testing.T) {
+	root := t.TempDir()
+	for _, args := range [][]string{
+		{"init"},
+		{"node", "add", "tools"},
+		{"node", "add", "unrelated"},
+	} {
+		if _, err := run(t, root, "", args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tools := filepath.Join(root, "tools")
+	for _, name := range []string{"common", "missing"} {
+		if _, err := run(t, tools, "", "node", "add", name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Remove(filepath.Join(tools, "missing")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(tools, "common", "extra", "child"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	indexPath := filepath.Join(root, index.Filename)
+	before, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A read-only comparison also works when the write lock exists.
+	if err := os.Mkdir(filepath.Join(root, ".workit.lock"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	out, err := run(t, tools, "", "sync", "status")
+	want := "✅ Inner · index & workdir\n./tools/ ✅\n└── common/ ✅\n\n" +
+		"☑️ Outer · index only\n./tools/\n└── missing/ ☑️\n\n" +
+		"⚠️ Outer · workdir only\n./tools/\n└── common/\n    └── extra/ ⚠️\n        └── child/ ⚠️\n"
+	if err != nil || out != want {
+		t.Fatalf("got:\n%s\nwant:\n%s\nerr: %v", out, want, err)
+	}
+	after, err := os.ReadFile(indexPath)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("status changed the index", err)
+	}
+	if err := os.Mkdir(filepath.Join(tools, "common", ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run(t, tools, "", "sync", "status"); err == nil || out != "" {
+		t.Fatalf("expected an error without a partial report, got %q, %v", out, err)
+	}
+}
+
+func TestHelpPrintsCommandTree(t *testing.T) {
+	out, err := run(t, t.TempDir(), "", "--help")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"├── 📁 sync",
+		"│   ├── ▸ status · Show matching",
+		"│       └── ▸ remove",
+		"--directory",
+		"--version",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "completion") {
+		t.Fatalf("completion is still present in help:\n%s", out)
 	}
 }

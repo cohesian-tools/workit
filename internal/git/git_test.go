@@ -69,7 +69,7 @@ func TestCachedDivergenceAndLocalChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.Branch != "main" || state.Upstream != "origin/main" || state.Ahead != 1 || state.Behind != 1 || state.Staged != 1 || state.Unstaged != 1 || state.Untracked != 1 {
+	if !state.HasCommit || !state.HasComparison || state.Unrelated || state.Branch != "main" || state.Upstream != "origin/main" || state.Ahead != 1 || state.Behind != 1 || state.Staged != 1 || state.Unstaged != 1 || state.Untracked != 1 {
 		t.Fatalf("unexpected status %+v", state)
 	}
 }

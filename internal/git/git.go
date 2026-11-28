@@ -137,12 +137,14 @@ func (c Client) Clone(ctx context.Context, directory, repository, protocol strin
 
 func (Client) Inspect(ctx context.Context, directory string) (workspace.RepoState, error) {
 	var state workspace.RepoState
-	raw, err := command(ctx, directory, "status", "--porcelain=v2", "--branch", "--untracked-files=normal")
+	raw, err := command(ctx, directory, "--no-optional-locks", "status", "--porcelain=v2", "--branch", "--ahead-behind", "--untracked-files=normal")
 	if err != nil {
 		return state, err
 	}
 	for _, line := range strings.Split(raw, "\n") {
 		switch {
+		case strings.HasPrefix(line, "# branch.oid "):
+			state.HasCommit = line != "# branch.oid (initial)"
 		case strings.HasPrefix(line, "# branch.head "):
 			state.Branch = strings.TrimPrefix(line, "# branch.head ")
 		case strings.HasPrefix(line, "# branch.upstream "):
@@ -150,8 +152,11 @@ func (Client) Inspect(ctx context.Context, directory string) (workspace.RepoStat
 		case strings.HasPrefix(line, "# branch.ab "):
 			fields := strings.Fields(line)
 			if len(fields) == 4 {
-				state.Ahead, _ = strconv.Atoi(fields[2][1:])
-				state.Behind, _ = strconv.Atoi(fields[3][1:])
+				ahead, aheadErr := strconv.Atoi(strings.TrimPrefix(fields[2], "+"))
+				behind, behindErr := strconv.Atoi(strings.TrimPrefix(fields[3], "-"))
+				if aheadErr == nil && behindErr == nil {
+					state.Ahead, state.Behind, state.HasComparison = ahead, behind, true
+				}
 			}
 		case strings.HasPrefix(line, "? "):
 			state.Untracked++
@@ -166,6 +171,15 @@ func (Client) Inspect(ctx context.Context, directory string) (workspace.RepoStat
 					state.Unstaged++
 				}
 			}
+		}
+	}
+	if state.Ahead > 0 && state.Behind > 0 {
+		if _, err := command(ctx, directory, "merge-base", "HEAD", "@{upstream}"); err != nil {
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+				return state, err
+			}
+			state.Unrelated = true
 		}
 	}
 	return state, nil
