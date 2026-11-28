@@ -15,6 +15,8 @@ choices for the points it left open.
    Workit workspace traversal. Optional root exclude paths omit management trees
    before traversal and cannot overlap registered nodes. Unidentifiable Git origins are reported, not
    silently treated as absent. Any incomplete/conflicting scan blocks sync.
+   The read-only `sync status` shares that comparison with reconciliation and
+   groups nodes into matching, index-only and workdir-only trees.
 4. **Repository identity:** lowercase GitHub owner/name. HTTPS and SSH origins
    are accepted; bare repositories and non-GitHub nodes are outside v1. Protocol
    config governs only new clones. Authentication stays with Git/GitHub tooling.

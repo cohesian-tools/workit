@@ -5,12 +5,10 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"github.com/cohesian-tools/workit/internal/graph"
 	"github.com/cohesian-tools/workit/internal/workspace"
 	"github.com/spf13/cobra"
 	"io"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 )
@@ -22,6 +20,8 @@ func New(service workspace.Service, version string) *cobra.Command {
 	}
 	root := newGroup("workit", "One workspace index, directory-local scope")
 	root.Version, root.SilenceUsage, root.SilenceErrors = version, true, true
+	root.CompletionOptions.DisableDefaultCmd = true
+	root.SetHelpFunc(printHelp)
 	root.PersistentFlags().StringVarP(&directory, "directory", "C", "", "Select a working directory without changing the process directory")
 	cwd := func() (string, error) {
 		if directory == "" {
@@ -113,7 +113,19 @@ func New(service workspace.Service, version string) *cobra.Command {
 		return service.Remove(ctx, dir, args[0], options)
 	}))
 	root.AddCommand(node)
-	sync := newGroup("sync", "Reconcile exactly one side of the workspace")
+	sync := newGroup("sync", "Compare or reconcile index and workdir")
+	sync.AddCommand(&cobra.Command{Use: "status", Short: "Show matching, index-only and workdir-only nodes", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		dir, err := cwd()
+		if err != nil {
+			return err
+		}
+		status, err := service.SyncStatus(cmd.Context(), dir)
+		if err != nil {
+			return err
+		}
+		printSyncStatus(cmd.OutOrStdout(), status)
+		return nil
+	}})
 	for _, definition := range []struct {
 		side  string
 		modes []string
@@ -150,72 +162,4 @@ func New(service workspace.Service, version string) *cobra.Command {
 	}))
 	root.AddCommand(void)
 	return root
-}
-
-func printPlan(cmd *cobra.Command, plan workspace.Plan) {
-	if plan.Root == "" {
-		return
-	}
-	fmt.Fprintf(cmd.OutOrStdout(), "Workspace: %s\nScope: %s (%s)\n", plan.Root, plan.Selected.Path, plan.Selected.Kind)
-	for _, step := range plan.Steps {
-		fmt.Fprintf(cmd.OutOrStdout(), "  %s  %s\n", step.Action, step.Node.Path)
-	}
-	if len(plan.Steps) == 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), "No changes.")
-	}
-}
-
-func printResults(cmd *cobra.Command, plan workspace.Plan, results []workspace.Result) {
-	if len(plan.Nodes) != 0 {
-		byPath := make(map[string]workspace.Result)
-		children := make(map[string][]graph.Node)
-		for _, node := range plan.Nodes {
-			if node.Kind != graph.Root {
-				children[path.Dir(node.Path)] = append(children[path.Dir(node.Path)], node)
-			}
-		}
-		for _, result := range results {
-			byPath[result.Step.Node.Path] = result
-		}
-		var walk func(graph.Node, string)
-		walk = func(node graph.Node, prefix string) {
-			label := path.Base(node.Path)
-			if node.Path == "." {
-				label = filepath.Base(plan.Root)
-			}
-			detail := ""
-			if result, ok := byPath[node.Path]; ok {
-				if result.Err != nil {
-					detail = "  ERROR: " + result.Err.Error()
-				} else if state := result.State; state != nil {
-					upstream := state.Upstream
-					if upstream == "" {
-						upstream = "no upstream"
-					}
-					detail = fmt.Sprintf("  %s -> %s | ahead:%d behind:%d staged:%d unstaged:%d untracked:%d conflicts:%d", state.Branch, upstream, state.Ahead, state.Behind, state.Staged, state.Unstaged, state.Untracked, state.Conflicts)
-				} else {
-					detail = "  ok"
-				}
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "%s%s (%s)%s\n", prefix, label, node.Kind, detail)
-			for _, child := range children[node.Path] {
-				walk(child, prefix+"  ")
-			}
-		}
-		walk(plan.Selected, "")
-		return
-	}
-	for _, result := range results {
-		status := "ok"
-		if result.Err != nil {
-			status = "ERROR: " + result.Err.Error()
-		}
-		fmt.Fprintf(cmd.OutOrStdout(), "%s %s: %s\n", result.Step.Action, result.Step.Node.Path, status)
-		if result.Output != "" {
-			fmt.Fprintln(cmd.OutOrStdout(), result.Output)
-		}
-	}
-	if len(results) == 0 && plan.Root != "" {
-		fmt.Fprintln(cmd.OutOrStdout(), "No changes applied.")
-	}
 }

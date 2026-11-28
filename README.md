@@ -6,8 +6,8 @@ Workit is a Go + Cobra CLI for a tree of independent Git repositories. A single
 `.workit.toml` records the workspace; your current directory selects the deepest
 registered ancestor and its subtree. Repositories need no Workit metadata.
 
-Version 0.1.0 implements
-the complete proposed command tree with sequential, plan-first execution.
+Workit compares the index and workdir with `sync status` and reports local Git
+state with `repo status`. Help, plans and results use the same tree layout.
 
 ## Run and install
 
@@ -15,7 +15,7 @@ Requires Go 1.25+ and Git. GitHub authentication stays external: use
 `gh auth login` / `gh auth setup-git` for HTTPS, or an SSH key for SSH clones.
 
 ```sh
-go install github.com/cohesian-tools/workit@v0.1.0
+go install github.com/cohesian-tools/workit@v0.2.0
 export PATH="$(go env GOPATH)/bin:$PATH"
 workit --version
 ```
@@ -48,6 +48,7 @@ workit node add tools
 cd tools
 workit node add cohesian-tools/typy.git --dry-run
 workit node add cohesian-tools/typy.git
+workit sync status
 workit repo status
 ```
 
@@ -71,6 +72,7 @@ workit
 │   ├── index
 │   │   ├── add
 │   │   └── prune
+│   ├── status
 │   └── workdir
 │       ├── add
 │       └── remove
@@ -92,25 +94,70 @@ for automation. Bare groups show help and perform no reconciliation.
 |---|---|
 | `node add` | Create namespace / clone repository, then register it |
 | `node remove` | Quarantine physical subtree, then unregister it |
+| `sync status` | Compare index and workdir in the selected scope |
 | `sync index add` | Register discovered, identifiable nodes |
 | `sync index prune` | Unregister missing nodes; keep physical content |
 | `sync workdir add` | Create/clone missing registered nodes; keep index |
 | `sync workdir remove` | Quarantine extras; keep index and matched descendants |
 | `void clean` | Permanently delete managed quarantine entries, at the physical root only |
 
-Node and sync commands require a root/namespace scope. Node arguments are relative
+Node commands and reconciliation require a root/namespace scope. Node arguments are relative
 to the selected composite, not an unregistered current directory. A namespace
 argument is one directory name. An argument ending in `.git` must be
 `owner/repository.git`; its canonical lowercase repository name becomes the local
 directory name. Existing paths, including empty directories, are collisions.
 
+## Sync status
+
+`workit sync status` scans the selected scope without writing or locking it.
+It reports three trees, even when a category is empty.
+
+| Tree | Nodes |
+|---|---|
+| ✅ Inner | Registered and present with the same kind and repository identity |
+| ☑️ Outer index | Registered and missing from the workdir |
+| ⚠️ Outer workdir | Present in the workdir and missing from the index |
+
+Unmarked ancestors provide directory context. For example, a registered
+`tools/` directory can appear as context in both outer trees:
+
+```text
+✅ Inner · index & workdir
+./ ✅
+└── tools/ ✅
+    └── workit ✅ cohesian-tools/workit
+
+☑️ Outer · index only
+./
+└── tools/
+    └── typy ☑️ cohesian-tools/typy
+
+⚠️ Outer · workdir only
+./
+└── tools/
+    └── drafts/ ⚠️
+```
+
+From inside a registered checkout, status compares that checkout's identity
+and stops at its Git boundary. Scan errors and identity or kind conflicts stop
+the comparison with an error.
+
 ## Git forest
 
-Repo commands target every registered repository in scope. Status renders the
-tree with current branch, upstream, cached ahead/behind counts, staged/unstaged
-changes, untracked entries and conflicts. No upstream is reported explicitly;
-status does not fetch. Git's normal untracked mode may summarize a directory as
-one entry. Repo errors are reported per node with a nonzero exit status.
+`workit repo status` shows each registered checkout's local branch, its cached
+upstream and three groups of indicators. Status uses the local tracking ref.
+Run `workit repo fetch` to refresh it first when needed.
+
+| Group | Indicators |
+|---|---|
+| `head` | ✅ synced, ⬆️ ahead, ⬇️ behind, ↔️ unsynced when both sides have commits past a common ancestor |
+| `stage` | ✅ no changes, ☑️ staged changes, ⚠️ unstaged or untracked changes. Both change markers can appear together. |
+| `conflicts` | ✅ none, ⚠️ unresolved conflicts with a count |
+
+HEAD also reports detached or unborn branches, a missing or unavailable
+upstream, and divergence with no visible common ancestor. Git's normal untracked
+mode can count an untracked directory as one entry. Repository errors are shown
+at the affected node and produce a nonzero exit status.
 
 Fetch updates `origin`, without merging. Pull requires a committed current local
 branch matching its first argument and a clean checkout including untracked
